@@ -47,9 +47,11 @@ from ..types import (
     LiveVideoCommentPayload,
     MessageSyncEvent,
     MessageSyncMessage,
+    Operation,
     PubsubEvent,
     PubsubPayload,
     ReactionStatus,
+    ReactionType,
     RealtimeDirectEvent,
     RealtimeZeroProvisionPayload,
     ThreadAction,
@@ -175,17 +177,22 @@ class AndroidMQTT:
 
     def _form_client_id(self) -> bytes:
         subscribe_topics = [
-            RealtimeTopic.PUBSUB,
-            RealtimeTopic.SUB_IRIS_RESPONSE,
-            RealtimeTopic.REALTIME_SUB,
-            RealtimeTopic.REGION_HINT,
-            RealtimeTopic.SEND_MESSAGE_RESPONSE,
-            RealtimeTopic.MESSAGE_SYNC,
-            RealtimeTopic.UNKNOWN_179,
-            RealtimeTopic.UNKNOWN_PP,
+            RealtimeTopic.PUBSUB,  # 88
+            RealtimeTopic.SUB_IRIS_RESPONSE,  # 135
+            RealtimeTopic.RS_REQ,  # 244
+            RealtimeTopic.REALTIME_SUB,  # 149
+            RealtimeTopic.REGION_HINT,  # 150
+            RealtimeTopic.RS_RESP,  # 245
+            RealtimeTopic.T_RTC_LOG,  # 274
+            RealtimeTopic.SEND_MESSAGE_RESPONSE,  # 133
+            RealtimeTopic.MESSAGE_SYNC,  # 146
+            RealtimeTopic.LIGHTSPEED_RESPONSE,  # 179
+            RealtimeTopic.UNKNOWN_PP,  # 34
         ]
         subscribe_topic_ids = [int(topic.encoded) for topic in subscribe_topics]
-        password = f"sessionid={self.state.cookies['sessionid']}"
+        password = f"authorization={self.state.session.authorization}"
+        # if not self.state.session.authorization:
+        #     password = f"sessionid={self.state.cookies['sessionid']}"
         cfg = RealtimeConfig(
             client_identifier=self.state.device.phone_id[:20],
             client_info=RealtimeClientInfo(
@@ -218,7 +225,7 @@ class AndroidMQTT:
                 "platform": "android",
                 "ig_mqtt_route": "django",
                 "pubsub_msg_type_blacklist": "direct, typing_type",
-                "auth_cache_enabled": "0",
+                "auth_cache_enabled": "1",
             },
         )
         return zlib.compress(cfg.to_thrift(), level=9)
@@ -309,12 +316,9 @@ class AndroidMQTT:
                 additional["has_seen"] = int(rest[1])
             elif subitem_key == "items":
                 additional["item_id"] = rest[1]
-                # TODO wtf is this?
-                #      it has something to do with reactions
-                if len(rest) > 4:
-                    additional[rest[2]] = {
-                        rest[3]: rest[4],
-                    }
+                if len(rest) > 4 and rest[2] == "reactions":
+                    additional["reaction_type"] = ReactionType(rest[3])
+                    additional["reaction_user_id"] = int(rest[4])
             elif subitem_key in "admin_user_ids":
                 additional["admin_user_id"] = int(rest[1])
             elif subitem_key == "activity_indicator_id":
@@ -330,10 +334,21 @@ class AndroidMQTT:
                 **self._parse_direct_thread_path(part.path),
             }
             try:
-                raw_message = {
-                    **raw_message,
-                    **json.loads(part.value),
-                }
+                json_value = json.loads(part.value)
+                if "reaction_type" in raw_message:
+                    self.log.trace("Treating %s as new reaction data", json_value)
+                    raw_message["new_reaction"] = json_value
+                    json_value["sender_id"] = raw_message.pop("reaction_user_id")
+                    json_value["type"] = raw_message.pop("reaction_type")
+                    json_value["client_context"] = parsed_item.mutation_token
+                    if part.op == Operation.REMOVE:
+                        json_value["emoji"] = None
+                        json_value["timestamp"] = None
+                else:
+                    raw_message = {
+                        **raw_message,
+                        **json_value,
+                    }
             except (json.JSONDecodeError, TypeError):
                 raw_message["value"] = part.value
             message = MessageSyncMessage.deserialize(raw_message)
@@ -619,7 +634,13 @@ class AndroidMQTT:
         resp = await self.request(
             RealtimeTopic.SUB_IRIS,
             RealtimeTopic.SUB_IRIS_RESPONSE,
-            {"seq_id": seq_id, "snapshot_at_ms": snapshot_at_ms},
+            {
+                "seq_id": seq_id,
+                "snapshot_at_ms": snapshot_at_ms,
+                "snapshot_app_version": self.state.application.APP_VERSION,
+                "timezone_offset": int(self.state.device.timezone_offset),
+                "subscription_type": "message",
+            },
             timeout=20,
         )
         self.log.debug("Iris subscribe response: %s", resp.payload.decode("utf-8"))

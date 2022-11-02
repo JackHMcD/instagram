@@ -81,6 +81,7 @@ from .thread_item import (
     MediaType,
     Reaction,
     Reactions,
+    ReactionType,
     ReelMediaShareItem,
     ReelShareItem,
     ReelShareReactionInfo,
@@ -96,6 +97,7 @@ from .thread_item import (
     VisualMedia,
     VoiceMediaData,
     VoiceMediaItem,
+    XMAMediaShareItem,
 )
 from .upload import FinishUploadResponse, UploadPhotoResponse, UploadVideoResponse
 from .user import SearchResultUser, UserSearchResponse

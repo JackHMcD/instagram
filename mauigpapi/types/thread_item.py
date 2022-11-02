@@ -77,6 +77,10 @@ class ThreadItemType(ExtensibleEnum):
     REACTION = "reaction"
     CLIP = "clip"
     GUIDE_SHARE = "guide_share"
+    XMA_MEDIA_SHARE = "xma_media_share"
+    XMA_REEL_SHARE = "xma_reel_share"
+    XMA_STORY_SHARE = "xma_story_share"
+    XMA_REEL_MENTION = "xma_reel_mention"
 
 
 @dataclass(kw_only=True)
@@ -374,18 +378,25 @@ class AnimatedMediaImages(SerializableAttrs):
 @dataclass(kw_only=True)
 class AnimatedMediaItem(SerializableAttrs):
     id: str
-    is_random: str
-    is_sticker: str
     images: AnimatedMediaImages
+    # user: {is_verified: bool, username: str}
+    # is_random: str | None
+    # is_sticker: str | bool
+
+
+class ReactionType(SerializableEnum):
+    LIKES = "likes"
+    EMOJIS = "emojis"
 
 
 @dataclass
 class Reaction(SerializableAttrs):
     sender_id: int
-    timestamp: int
-    client_context: Optional[str]
-    emoji: str = "❤️"
+    timestamp: Optional[int]
+    emoji: Optional[str] = "❤️"
     super_react_type: Optional[str] = None
+    client_context: Optional[str] = None
+    type: Optional[ReactionType] = None
 
     @property
     def timestamp_ms(self) -> int:
@@ -488,6 +499,22 @@ class DirectMediaShareItem(SerializableAttrs):
 
 
 @dataclass
+class XMAMediaShareItem(SerializableAttrs):
+    xma_layout_type: int
+
+    target_url: str
+
+    title_text: str
+    header_title_text: str
+    # subtitle_text: Optional[str]
+
+    preview_url: str
+    preview_url_mime_type: str
+    preview_width: int
+    preview_height: int
+
+
+@dataclass
 class ClipItem(SerializableAttrs):
     # TODO there are some additional fields in clips
     clip: MediaShareItem
@@ -511,11 +538,15 @@ class ThreadItem(SerializableAttrs):
     timestamp: int = 0
     item_type: Optional[ThreadItemType] = None
     is_shh_mode: bool = False
+    new_reaction: Optional[Reaction] = None
 
     text: Optional[str] = None
     client_context: Optional[str] = None
     show_forward_attribution: Optional[bool] = None
     action_log: Optional[ThreadItemActionLog] = None
+    auxiliary_text: Optional[str] = None
+    auxiliary_text_source_type: Optional[int] = None
+    message_item_type: Optional[str] = None
 
     replied_to_message: Optional["ThreadItem"] = None
 
@@ -525,6 +556,10 @@ class ThreadItem(SerializableAttrs):
     visual_media: Optional[VisualMedia] = None
     media_share: Optional[MediaShareItem] = None
     direct_media_share: Optional[DirectMediaShareItem] = None
+    xma_media_share: Optional[List[XMAMediaShareItem]] = None
+    xma_story_share: Optional[List[XMAMediaShareItem]] = None
+    xma_reel_share: Optional[List[XMAMediaShareItem]] = None
+    xma_reel_mention: Optional[List[XMAMediaShareItem]] = None
     reel_share: Optional[ReelShareItem] = None
     story_share: Optional[StoryShareItem] = None
     location: Optional[Location] = None
@@ -546,7 +581,7 @@ class ThreadItem(SerializableAttrs):
         try:
             return _dict_to_attrs(cls, data)
         except SerializerError:
-            log.debug("Failed to deserialize ThreadItem %s", data)
+            log.debug("Failed to deserialize ThreadItem %s", data, exc_info=True)
             return Obj(**data)
 
     @property
