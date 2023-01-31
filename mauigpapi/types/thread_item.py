@@ -81,6 +81,7 @@ class ThreadItemType(ExtensibleEnum):
     XMA_REEL_SHARE = "xma_reel_share"
     XMA_STORY_SHARE = "xma_story_share"
     XMA_REEL_MENTION = "xma_reel_mention"
+    EXPIRED_PLACEHOLDER = "expired_placeholder"
 
 
 @dataclass(kw_only=True)
@@ -502,16 +503,27 @@ class DirectMediaShareItem(SerializableAttrs):
 class XMAMediaShareItem(SerializableAttrs):
     xma_layout_type: int
 
-    target_url: str
-
     title_text: str
-    header_title_text: str
-    # subtitle_text: Optional[str]
 
-    preview_url: str
-    preview_url_mime_type: str
-    preview_width: int
-    preview_height: int
+    target_url: Optional[str] = None
+
+    header_title_text: Optional[str] = None
+    subtitle_text: Optional[str] = None
+    caption_body_text: Optional[str] = None
+
+    preview_url: Optional[str] = None
+    preview_url_mime_type: Optional[str] = None
+    preview_width: Optional[int] = None
+    preview_height: Optional[int] = None
+
+
+@dataclass
+class XMAMediaProfileShareItem(SerializableAttrs):
+    xma_layout_type: int
+
+    header_title_text: str
+    header_subtitle_text: Optional[str]
+    target_url: str
 
 
 @dataclass
@@ -556,10 +568,12 @@ class ThreadItem(SerializableAttrs):
     visual_media: Optional[VisualMedia] = None
     media_share: Optional[MediaShareItem] = None
     direct_media_share: Optional[DirectMediaShareItem] = None
+    generic_xma: Optional[List[XMAMediaShareItem]] = None
     xma_media_share: Optional[List[XMAMediaShareItem]] = None
     xma_story_share: Optional[List[XMAMediaShareItem]] = None
     xma_reel_share: Optional[List[XMAMediaShareItem]] = None
     xma_reel_mention: Optional[List[XMAMediaShareItem]] = None
+    xma_profile: Optional[List[XMAMediaProfileShareItem]] = None
     reel_share: Optional[ReelShareItem] = None
     story_share: Optional[StoryShareItem] = None
     location: Optional[Location] = None

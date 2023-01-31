@@ -42,6 +42,7 @@ class ChallengeData(SerializableAttrs):
     lock: bool
     logout: bool
     native_flow: bool
+    challenge_context: Optional[str] = None
 
 
 @dataclass
@@ -89,6 +90,7 @@ class LoginRequiredResponse(SerializableAttrs):
 class LoginErrorResponseButton(SerializableAttrs):
     title: str
     action: str
+    username: Optional[str] = None
 
 
 @dataclass
@@ -108,19 +110,21 @@ class LoginTwoFactorInfo(SerializableAttrs):
     two_factor_identifier: str
     show_messenger_code_option: bool
     show_new_login_screen: bool
-    show_trusted_device_option: bool
-    should_opt_in_trusted_device_option: bool
-    pending_trusted_notification: bool
+    should_opt_in_trusted_device_option: Optional[bool] = None
+    pending_trusted_notification: Optional[bool] = None
+    show_trusted_device_option: Optional[bool] = None
     # TODO type
     # sms_not_allowed_reason: Any
+    pk: Optional[int] = None
     phone_verification_settings: Optional[LoginPhoneVerificationSettings] = None
+    trusted_notification_polling_nonce: Optional[str] = None
 
 
 @dataclass
 class LoginErrorResponse(SerializableAttrs):
-    message: str
     status: str
-    error_type: str
+    message: Optional[str] = None
+    error_type: Optional[str] = None
     error_title: Optional[str] = None
     buttons: Optional[List[LoginErrorResponseButton]] = None
     invalid_credentials: Optional[bool] = None
@@ -131,3 +135,4 @@ class LoginErrorResponse(SerializableAttrs):
     # FB login error fields
     account_created: Optional[bool] = None
     dryrun_passed: Optional[bool] = None
+    username: Optional[str] = None

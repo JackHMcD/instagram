@@ -1,5 +1,5 @@
 # mautrix-instagram - A Matrix-Instagram puppeting bridge.
-# Copyright (C) 2020 Tulir Asokan
+# Copyright (C) 2022 Tulir Asokan, Sumner Evans
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -13,30 +13,22 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-from .base import IGError
+from mautrix.util.async_db import UpgradeTable
 
+upgrade_table = UpgradeTable()
 
-class IGMQTTError(IGError):
-    pass
-
-
-class MQTTNotLoggedIn(IGMQTTError):
-    pass
-
-
-class MQTTReconnectionError(IGMQTTError):
-    pass
-
-
-class MQTTNotConnected(IGMQTTError):
-    pass
-
-
-class MQTTConnectionUnauthorized(IGMQTTError):
-    def __init__(self) -> None:
-        super().__init__("Server refused connection with error code 5")
-
-
-class IrisSubscribeError(IGMQTTError):
-    def __init__(self, type: str, message: str) -> None:
-        super().__init__(f"{type}: {message}")
+from . import (
+    v00_latest_revision,
+    v02_name_avatar_set,
+    v03_relay_portal,
+    v04_message_client_content,
+    v05_message_ig_timestamp,
+    v06_hidden_events,
+    v07_reaction_timestamps,
+    v08_sync_sequence_id,
+    v09_backfill_queue,
+    v10_portal_infinite_backfill,
+    v11_per_user_thread_sync_status,
+    v12_portal_thread_image_id,
+    v13_fix_portal_thread_image_id,
+)

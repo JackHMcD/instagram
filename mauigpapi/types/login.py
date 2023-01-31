@@ -13,7 +13,7 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-from typing import Any, List, Optional
+from typing import Optional
 
 from attr import dataclass
 
@@ -36,14 +36,12 @@ class LoginResponseUser(BaseFullResponseUser, SerializableAttrs):
     can_boost_post: bool
     can_see_organic_insights: bool
     show_insights_terms: bool
-    has_placed_orders: bool
     nametag: LoginResponseNametag
     allow_contacts_sync: bool
 
     total_igtv_videos: int
     interop_messaging_user_fbid: int
     is_using_unified_inbox_for_direct: bool
-    professional_conversion_suggested_account_type: Optional[int]
 
 
 @dataclass

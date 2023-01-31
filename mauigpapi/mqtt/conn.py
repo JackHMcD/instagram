@@ -23,7 +23,6 @@ import json
 import logging
 import re
 import time
-import urllib.request
 import zlib
 
 from yarl import URL
@@ -36,7 +35,9 @@ from ..errors import (
     MQTTConnectionUnauthorized,
     MQTTNotConnected,
     MQTTNotLoggedIn,
+    MQTTReconnectionError,
 )
+from ..proxy import ProxyHandler
 from ..state import AndroidState
 from ..types import (
     AppPresenceEventPayload,
@@ -56,10 +57,11 @@ from ..types import (
     RealtimeZeroProvisionPayload,
     ThreadAction,
     ThreadItemType,
+    ThreadRemoveEvent,
     ThreadSyncEvent,
     TypingStatus,
 )
-from .events import Connect, Disconnect, NewSequenceID
+from .events import Connect, Disconnect, NewSequenceID, ProxyUpdate
 from .otclient import MQTToTClient
 from .subscription import GraphQLQueryID, RealtimeTopic, everclear_subscriptions
 from .thrift import ForegroundStateConfig, IncomingMessage, RealtimeClientInfo, RealtimeConfig
@@ -90,7 +92,9 @@ class AndroidMQTT:
     _publish_waiters: dict[int, asyncio.Future]
     _response_waiters: dict[RealtimeTopic, asyncio.Future]
     _response_waiter_locks: dict[RealtimeTopic, asyncio.Lock]
-    _message_response_waiters: dict[str, asyncio.Future]
+    _message_response_waiter_lock: asyncio.Lock
+    _message_response_waiter_id: str | None
+    _message_response_waiter: asyncio.Future | None
     _disconnect_error: Exception | None
     _event_handlers: dict[Type[T], list[Callable[[T], Awaitable[None]]]]
     _outgoing_events: asyncio.Queue
@@ -101,8 +105,8 @@ class AndroidMQTT:
     def __init__(
         self,
         state: AndroidState,
-        loop: asyncio.AbstractEventLoop | None = None,
         log: TraceLogger | None = None,
+        proxy_handler: ProxyHandler | None = None,
     ) -> None:
         self._graphql_subs = set()
         self._skywalker_subs = set()
@@ -110,14 +114,16 @@ class AndroidMQTT:
         self._iris_snapshot_at_ms = None
         self._publish_waiters = {}
         self._response_waiters = {}
-        self._message_response_waiters = {}
+        self._message_response_waiter_lock = asyncio.Lock()
+        self._message_response_waiter_id = None
+        self._message_response_waiter = None
         self._disconnect_error = None
         self._response_waiter_locks = defaultdict(lambda: asyncio.Lock())
         self._event_handlers = defaultdict(lambda: [])
         self._event_dispatcher_task = None
         self._outgoing_events = asyncio.Queue()
         self.log = log or logging.getLogger("mauigpapi.mqtt")
-        self._loop = loop or asyncio.get_event_loop()
+        self._loop = asyncio.get_running_loop()
         self.state = state
         self._client = MQTToTClient(
             client_id=self._form_client_id(),
@@ -125,26 +131,8 @@ class AndroidMQTT:
             protocol=pmc.MQTTv31,
             transport="tcp",
         )
-        try:
-            http_proxy = urllib.request.getproxies()["http"]
-        except KeyError:
-            http_proxy = None
-        if http_proxy and socks and URL:
-            proxy_url = URL(http_proxy)
-            proxy_type = {
-                "http": socks.HTTP,
-                "https": socks.HTTP,
-                "socks": socks.SOCKS5,
-                "socks5": socks.SOCKS5,
-                "socks4": socks.SOCKS4,
-            }[proxy_url.scheme]
-            self._client.proxy_set(
-                proxy_type=proxy_type,
-                proxy_addr=proxy_url.host,
-                proxy_port=proxy_url.port,
-                proxy_username=proxy_url.user,
-                proxy_password=proxy_url.password,
-            )
+        self.proxy_handler = proxy_handler
+        self.setup_proxy()
         self._client.enable_logger()
         self._client.tls_set()
         # mqtt.max_inflight_messages_set(20)  # The rest will get queued
@@ -161,6 +149,28 @@ class AndroidMQTT:
         self._client.on_socket_register_write = self._on_socket_register_write
         self._client.on_socket_unregister_write = self._on_socket_unregister_write
 
+    def setup_proxy(self):
+        http_proxy = self.proxy_handler.get_proxy_url() if self.proxy_handler else None
+        if http_proxy:
+            if not socks:
+                self.log.warning("http_proxy is set, but pysocks is not installed")
+            else:
+                proxy_url = URL(http_proxy)
+                proxy_type = {
+                    "http": socks.HTTP,
+                    "https": socks.HTTP,
+                    "socks": socks.SOCKS5,
+                    "socks5": socks.SOCKS5,
+                    "socks4": socks.SOCKS4,
+                }[proxy_url.scheme]
+                self._client.proxy_set(
+                    proxy_type=proxy_type,
+                    proxy_addr=proxy_url.host,
+                    proxy_port=proxy_url.port,
+                    proxy_username=proxy_url.user,
+                    proxy_password=proxy_url.password,
+                )
+
     def _clear_response_waiters(self) -> None:
         for waiter in self._response_waiters.values():
             if not waiter.done():
@@ -172,6 +182,12 @@ class AndroidMQTT:
                 waiter.set_exception(
                     MQTTNotConnected("MQTT disconnected before request was published")
                 )
+        if self._message_response_waiter and not self._message_response_waiter.done():
+            self._message_response_waiter.set_exception(
+                MQTTNotConnected("MQTT disconnected before message send returned response")
+            )
+            self._message_response_waiter = None
+            self._message_response_waiter_id = None
         self._response_waiters = {}
         self._publish_waiters = {}
 
@@ -191,8 +207,6 @@ class AndroidMQTT:
         ]
         subscribe_topic_ids = [int(topic.encoded) for topic in subscribe_topics]
         password = f"authorization={self.state.session.authorization}"
-        # if not self.state.session.authorization:
-        #     password = f"sessionid={self.state.cookies['sessionid']}"
         cfg = RealtimeConfig(
             client_identifier=self.state.device.phone_id[:20],
             client_info=RealtimeClientInfo(
@@ -206,19 +220,19 @@ class AndroidMQTT:
                 device_id=self.state.device.phone_id,
                 is_initially_foreground=False,
                 network_type=1,
-                network_subtype=0,
+                network_subtype=-1,
                 client_mqtt_session_id=int(time.time() * 1000) & 0xFFFFFFFF,
                 subscribe_topics=subscribe_topic_ids,
                 client_type="cookie_auth",
                 app_id=567067343352427,
-                region_preference=self.state.session.region_hint or "LLA",
+                # region_preference=self.state.session.region_hint or "LLA",
                 device_secret="",
                 client_stack=3,
             ),
             password=password,
             app_specific_info={
+                "capabilities": self.state.application.CAPABILITIES,
                 "app_version": self.state.application.APP_VERSION,
-                "X-IG-Capabilities": self.state.application.CAPABILITIES,
                 "everclear_subscriptions": json.dumps(everclear_subscriptions),
                 "User-Agent": self.state.user_agent,
                 "Accept-Language": self.state.device.language.replace("_", "-"),
@@ -354,12 +368,24 @@ class AndroidMQTT:
             message = MessageSyncMessage.deserialize(raw_message)
             evt = MessageSyncEvent(iris=parsed_item, message=message)
         elif part.path.startswith("/direct_v2/inbox/threads/"):
-            raw_message = {
-                "path": part.path,
-                "op": part.op,
-                **json.loads(part.value),
-            }
-            evt = ThreadSyncEvent.deserialize(raw_message)
+            if part.op == Operation.REMOVE:
+                blank, direct_v2, inbox, threads, thread_id, *_ = part.path.split("/")
+                evt = ThreadRemoveEvent.deserialize(
+                    {
+                        "thread_id": thread_id,
+                        "path": part.path,
+                        "op": part.op,
+                        **json.loads(part.value),
+                    }
+                )
+            else:
+                evt = ThreadSyncEvent.deserialize(
+                    {
+                        "path": part.path,
+                        "op": part.op,
+                        **json.loads(part.value),
+                    }
+                )
         else:
             self.log.warning(f"Unsupported path {part.path}")
             return False
@@ -443,6 +469,31 @@ class AndroidMQTT:
         for evt in self._parse_realtime_sub_item(topic, parsed_json):
             self._loop.create_task(self._dispatch(evt))
 
+    def _handle_send_response(self, message: pmc.MQTTMessage) -> None:
+        data = json.loads(message.payload.decode("utf-8"))
+        try:
+            ccid = data["payload"]["client_context"]
+        except KeyError:
+            self.log.warning(
+                "Didn't find client_context in send message response: %s", message.payload
+            )
+            ccid = self._message_response_waiter_id
+        else:
+            if ccid != self._message_response_waiter_id:
+                self.log.error(
+                    "Mismatching client_context in send message response (%s != %s)",
+                    ccid,
+                    self._message_response_waiter_id,
+                )
+                return
+        if self._message_response_waiter and not self._message_response_waiter.done():
+            self.log.debug("Got response to %s: %s", ccid, message.payload)
+            self._message_response_waiter.set_result(message)
+            self._message_response_waiter = None
+            self._message_response_waiter_id = None
+        else:
+            self.log.warning("Didn't find task waiting for response %s", message.payload)
+
     def _on_message_handler(self, client: MQTToTClient, _: Any, message: pmc.MQTTMessage) -> None:
         try:
             topic = RealtimeTopic.decode(message.topic)
@@ -455,19 +506,7 @@ class AndroidMQTT:
             elif topic == RealtimeTopic.REALTIME_SUB:
                 self._on_realtime_sub(message.payload)
             elif topic == RealtimeTopic.SEND_MESSAGE_RESPONSE:
-                try:
-                    data = json.loads(message.payload.decode("utf-8"))
-                    ccid = data["payload"]["client_context"]
-                    waiter = self._message_response_waiters.pop(ccid)
-                except KeyError as e:
-                    self.log.debug(
-                        "No handler for send message response: %s (missing %s key)",
-                        message.payload,
-                        e,
-                    )
-                else:
-                    self.log.trace("Got response to %s: %s", ccid, message.payload)
-                    waiter.set_result(message)
+                self._handle_send_response(message)
             else:
                 try:
                     waiter = self._response_waiters.pop(topic)
@@ -489,8 +528,7 @@ class AndroidMQTT:
             self.log.trace("Trying to reconnect to MQTT")
             self._client.reconnect()
         except (SocketError, OSError, pmc.WebsocketConnectionError) as e:
-            # TODO custom class
-            raise MQTTNotLoggedIn("MQTT reconnection failed") from e
+            raise MQTTReconnectionError("MQTT reconnection failed") from e
 
     def add_event_handler(
         self, evt_type: Type[T], handler: Callable[[T], Awaitable[None]]
@@ -572,6 +610,9 @@ class AndroidMQTT:
                 elif rc == pmc.MQTT_ERR_NO_CONN:
                     if connection_retries > retry_limit:
                         raise MQTTNotConnected(f"Connection failed {connection_retries} times")
+                    if self.proxy_handler and self.proxy_handler.update_proxy_url():
+                        self.setup_proxy()
+                        await self._dispatch(ProxyUpdate())
                     sleep = connection_retries * 2
                     await self._dispatch(
                         Disconnect(
@@ -690,6 +731,7 @@ class AndroidMQTT:
         client_context: str | None = None,
         **kwargs: Any,
     ) -> CommandResponse | None:
+        self.log.debug(f"Preparing to send {action} to {thread_id} with {client_context}")
         client_context = client_context or self.state.gen_client_context()
         req = {
             "thread_id": thread_id,
@@ -699,20 +741,24 @@ class AndroidMQTT:
             # "device_id": self.state.cookies["ig_did"],
             **kwargs,
         }
-        if action in (ThreadAction.MARK_SEEN,):
-            # Some commands don't have client_context in the response, so we can't properly match
-            # them to the requests. We probably don't need the data, so just ignore it.
-            await self.publish(RealtimeTopic.SEND_MESSAGE, payload=req)
-            return None
-        else:
-            fut = asyncio.Future()
-            self._message_response_waiters[client_context] = fut
+        lock_start = time.monotonic()
+        async with self._message_response_waiter_lock:
+            lock_wait_dur = time.monotonic() - lock_start
+            if lock_wait_dur > 1:
+                self.log.warning(f"Waited {lock_wait_dur:.3f} seconds to send {client_context}")
+            fut = self._message_response_waiter = asyncio.Future()
+            self._message_response_waiter_id = client_context
+            self.log.debug(f"Publishing {action} to {thread_id} with {client_context}")
             await self.publish(RealtimeTopic.SEND_MESSAGE, req)
             self.log.trace(
                 f"Request published to {RealtimeTopic.SEND_MESSAGE}, "
                 f"waiting for response {RealtimeTopic.SEND_MESSAGE_RESPONSE}"
             )
-            resp = await fut
+            try:
+                resp = await asyncio.wait_for(fut, timeout=30000)
+            except asyncio.TimeoutError:
+                self.log.error(f"Request with ID {client_context} timed out!")
+                raise
             return CommandResponse.parse_json(resp.payload.decode("utf-8"))
 
     def send_item(

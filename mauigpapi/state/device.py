@@ -1,5 +1,5 @@
 # mautrix-instagram - A Matrix-Instagram puppeting bridge.
-# Copyright (C) 2020 Tulir Asokan
+# Copyright (C) 2023 Tulir Asokan
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -15,8 +15,6 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 from typing import Optional, Union
 from uuid import UUID
-import json
-import pkgutil
 import random
 import string
 import time
@@ -26,19 +24,16 @@ import attr
 
 from mautrix.types import SerializableAttrs
 
-builds = json.loads(pkgutil.get_data("mauigpapi.state", "samples/builds.json"))
-descriptors = json.loads(pkgutil.get_data("mauigpapi.state", "samples/devices.json"))
-
 
 @dataclass
 class AndroidDevice(SerializableAttrs):
     id: Optional[str] = None
     descriptor: Optional[str] = None
     uuid: Optional[str] = None
+    fdid: Optional[str] = None
     phone_id: Optional[str] = attr.ib(default=None, metadata={"json": "phoneId"})
     # Google Play advertising ID
     adid: Optional[str] = None
-    build: Optional[str] = None
 
     language: str = "en_US"
     radio_type: str = "wifi-none"
@@ -74,7 +69,8 @@ class AndroidDevice(SerializableAttrs):
         rand = random.Random(seed)
         self.phone_id = str(UUID(int=rand.getrandbits(128), version=4))
         self.adid = str(UUID(int=rand.getrandbits(128), version=4))
-        self.id = f"android-{''.join(rand.choices(string.hexdigits, k=16))}"
-        self.descriptor = rand.choice(descriptors)
+        self.id = f"android-{''.join(rand.choices(string.hexdigits, k=16))}".lower()
+        self.descriptor = "33/13; 420dpi; 1080x2219; Google/google; Pixel 6; oriole; oriole"
+        # "33/13; 560dpi; 1440x2934; Google/google; Pixel 6 Pro; raven; raven",
         self.uuid = str(UUID(int=rand.getrandbits(128), version=4))
-        self.build = rand.choice(builds)
+        self.fdid = str(UUID(int=rand.getrandbits(128), version=4))

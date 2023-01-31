@@ -1,5 +1,5 @@
 # mautrix-instagram - A Matrix-Instagram puppeting bridge.
-# Copyright (C) 2020 Tulir Asokan
+# Copyright (C) 2022 Tulir Asokan, Sumner Evans
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -13,30 +13,14 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-from .base import IGError
+from mautrix.util.async_db import Connection
+
+from . import upgrade_table
 
 
-class IGMQTTError(IGError):
-    pass
-
-
-class MQTTNotLoggedIn(IGMQTTError):
-    pass
-
-
-class MQTTReconnectionError(IGMQTTError):
-    pass
-
-
-class MQTTNotConnected(IGMQTTError):
-    pass
-
-
-class MQTTConnectionUnauthorized(IGMQTTError):
-    def __init__(self) -> None:
-        super().__init__("Server refused connection with error code 5")
-
-
-class IrisSubscribeError(IGMQTTError):
-    def __init__(self, type: str, message: str) -> None:
-        super().__init__(f"{type}: {message}")
+@upgrade_table.register(description="Add name_set and avatar_set to portal table")
+async def upgrade_v2(conn: Connection) -> None:
+    await conn.execute("ALTER TABLE portal ADD COLUMN avatar_url TEXT")
+    await conn.execute("ALTER TABLE portal ADD COLUMN name_set BOOLEAN NOT NULL DEFAULT false")
+    await conn.execute("ALTER TABLE portal ADD COLUMN avatar_set BOOLEAN NOT NULL DEFAULT false")
+    await conn.execute("UPDATE portal SET name_set=true WHERE name<>''")

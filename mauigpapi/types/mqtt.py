@@ -62,10 +62,26 @@ class CommandResponsePayload(SerializableAttrs):
 
 @dataclass(kw_only=True)
 class CommandResponse(SerializableAttrs):
-    action: str
+    action: Optional[str] = None
     status: str
     status_code: Optional[str] = None
-    payload: CommandResponsePayload
+    message: Optional[str] = None
+    payload: Optional[CommandResponsePayload] = None
+    exception: Optional[str] = None
+    content: Optional[str] = None
+
+    @property
+    def error_message(self) -> Optional[str]:
+        if self.payload and self.payload.message:
+            return self.payload.message
+        elif self.message:
+            return self.message
+        elif self.exception:
+            if self.content:
+                return f"{self.exception}: {self.content}"
+            return self.exception
+        else:
+            return "unknown response data"
 
 
 @dataclass(kw_only=True)
@@ -108,6 +124,15 @@ class MessageSyncEvent(SerializableAttrs):
 class ThreadSyncEvent(Thread, SerializableAttrs):
     path: str
     op: Operation
+
+
+@dataclass
+class ThreadRemoveEvent(SerializableAttrs):
+    thread_id: str
+
+    path: str
+    op: Operation
+    data: Any
 
 
 @dataclass(kw_only=True)

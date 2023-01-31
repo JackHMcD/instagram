@@ -20,16 +20,30 @@ import io
 import json
 import struct
 import time
+import uuid
 
 from Crypto.Cipher import AES, PKCS1_v1_5
 from Crypto.PublicKey import RSA
 from Crypto.Random import get_random_bytes
 
-from ..types import FacebookLoginResponse, LoginResponse, LogoutResponse
+from ..types import FacebookLoginResponse, LoginErrorResponse, LoginResponse, LogoutResponse
 from .base import BaseAndroidAPI
 
 
 class LoginAPI(BaseAndroidAPI):
+    async def get_mobile_config(self) -> None:
+        req = {
+            "bool_opt_policy": "0",
+            "mobileconfigsessionless": "",
+            "api_version": "3",
+            "unit_type": "1",
+            "query_hash": "dae17f1d3276207ebfe78f7a67cc9a04d4b88ff8c88dfc17e148fafb3f655b8e",
+            "device_id": self.state.device.id,
+            "fetch_type": "ASYNC_FULL",
+            "family_device_id": self.state.device.fdid.upper(),
+        }
+        await self.std_http_post("/api/v1/launcher/mobileconfig/", data=req)
+
     async def login(
         self,
         username: str,
@@ -47,11 +61,10 @@ class LoginAPI(BaseAndroidAPI):
             "enc_password": encrypted_password,
             "guid": self.state.device.uuid,
             "phone_id": self.state.device.phone_id,
-            "_csrftoken": self.state.cookies.csrf_token,
             "device_id": self.state.device.id,
-            "adid": "",  # not set on pre-login
+            "adid": self.state.device.adid,
             "google_tokens": "[]",
-            "login_attempt_count": 0,  # TODO maybe cache this somewhere?
+            "login_attempt_count": "0",  # TODO maybe cache this somewhere?
             "country_codes": json.dumps([{"country_code": "1", "source": "default"}]),
             "jazoest": self._jazoest,
         }
@@ -62,7 +75,6 @@ class LoginAPI(BaseAndroidAPI):
     async def one_tap_app_login(self, user_id: str, nonce: str) -> LoginResponse:
         req = {
             "phone_id": self.state.device.phone_id,
-            "_csrftoken": self.state.cookies.csrf_token,
             "user_id": user_id,
             "adid": self.state.device.adid,
             "guid": self.state.device.uuid,
@@ -71,6 +83,21 @@ class LoginAPI(BaseAndroidAPI):
         }
         return await self.std_http_post(
             "/api/v1/accounts/one_tap_app_login/", data=req, response_type=LoginResponse
+        )
+
+    async def send_two_factor_login_sms(
+        self, username: str, identifier: str
+    ) -> LoginErrorResponse:
+        req = {
+            "two_factor_identifier": identifier,
+            "username": username,
+            "guid": self.state.device.uuid,
+            "device_id": self.state.device.id,
+        }
+        return await self.std_http_post(
+            "/api/v1/accounts/send_two_factor_login_sms/",
+            data=req,
+            response_type=LoginErrorResponse,
         )
 
     async def two_factor_login(
@@ -83,17 +110,20 @@ class LoginAPI(BaseAndroidAPI):
     ) -> LoginResponse:
         req = {
             "verification_code": code,
-            "_csrftoken": self.state.cookies.csrf_token,
             "two_factor_identifier": identifier,
             "username": username,
             "trust_this_device": "1" if trust_device else "0",
             "guid": self.state.device.uuid,
             "device_id": self.state.device.id,
-            "verification_method": "0" if is_totp else "1",
+            # TOTP = 3, Backup code = 2, SMS = 1
+            "verification_method": "3" if is_totp else "1",
         }
         return await self.std_http_post(
             "/api/v1/accounts/two_factor_login/", data=req, response_type=LoginResponse
         )
+
+    # async def two_factor_trusted_status(self, username: str, identifier: str, polling_nonce: str):
+    #     pass
 
     async def facebook_signup(self, fb_access_token: str) -> FacebookLoginResponse:
         req = {
@@ -116,7 +146,6 @@ class LoginAPI(BaseAndroidAPI):
         req = {
             "guid": self.state.device.uuid,
             "phone_id": self.state.device.phone_id,
-            "_csrftoken": self.state.cookies.csrf_token,
             "device_id": self.state.device.id,
             "_uuid": self.state.device.uuid,
             "one_tap_app_login": one_tap_app_login,

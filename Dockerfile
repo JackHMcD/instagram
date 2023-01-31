@@ -1,6 +1,4 @@
-FROM docker.io/alpine:3.16
-
-ARG TARGETARCH=amd64
+FROM docker.io/alpine:3.17
 
 RUN apk add --no-cache \
       python3 py3-pip py3-setuptools py3-wheel \
@@ -11,6 +9,9 @@ RUN apk add --no-cache \
       py3-commonmark \
       #py3-prometheus-client \
       py3-paho-mqtt \
+      # proxy support
+      py3-aiohttp-socks \
+      py3-pysocks \
       # Other dependencies
       ca-certificates \
       su-exec \

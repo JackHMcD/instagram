@@ -1,5 +1,5 @@
 # mautrix-instagram - A Matrix-Instagram puppeting bridge.
-# Copyright (C) 2021 Tulir Asokan
+# Copyright (C) 2022 Tulir Asokan, Sumner Evans
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -13,16 +13,12 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-from typing import Dict
+from mautrix.util.async_db import Connection
 
-from ..types import AndroidExperiment, QeSyncResponse
+from . import upgrade_table
 
 
-class AndroidExperiments:
-    experiments: Dict[str, AndroidExperiment]
-
-    def __init__(self) -> None:
-        self.experiments = {}
-
-    def update(self, updated: QeSyncResponse) -> None:
-        self.experiments.update({item.name: item.parse() for item in updated.experiments})
+@upgrade_table.register(description="Store sync sequence ID in user table")
+async def upgrade_v8(conn: Connection) -> None:
+    await conn.execute('ALTER TABLE "user" ADD COLUMN seq_id BIGINT')
+    await conn.execute('ALTER TABLE "user" ADD COLUMN snapshot_at_ms BIGINT')

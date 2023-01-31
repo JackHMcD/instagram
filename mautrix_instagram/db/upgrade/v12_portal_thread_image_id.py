@@ -1,5 +1,5 @@
 # mautrix-instagram - A Matrix-Instagram puppeting bridge.
-# Copyright (C) 2020 Tulir Asokan
+# Copyright (C) 2022 Tulir Asokan, Sumner Evans
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -13,30 +13,11 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-from .base import IGError
+from mautrix.util.async_db import Connection
+
+from . import upgrade_table
 
 
-class IGMQTTError(IGError):
-    pass
-
-
-class MQTTNotLoggedIn(IGMQTTError):
-    pass
-
-
-class MQTTReconnectionError(IGMQTTError):
-    pass
-
-
-class MQTTNotConnected(IGMQTTError):
-    pass
-
-
-class MQTTConnectionUnauthorized(IGMQTTError):
-    def __init__(self) -> None:
-        super().__init__("Server refused connection with error code 5")
-
-
-class IrisSubscribeError(IGMQTTError):
-    def __init__(self, type: str, message: str) -> None:
-        super().__init__(f"{type}: {message}")
+@upgrade_table.register(description="Add column to portal to track group thread image ID")
+async def upgrade_v12(conn: Connection) -> None:
+    await conn.execute("ALTER TABLE portal ADD COLUMN thread_image_id INTEGER")

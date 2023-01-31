@@ -28,18 +28,22 @@ from yarl import URL
 
 from mauigpapi import AndroidAPI, AndroidState
 from mauigpapi.errors import (
+    IG2FACodeExpiredError,
     IGBad2FACodeError,
     IGChallengeError,
     IGChallengeWrongCodeError,
     IGCheckpointError,
     IGConsentRequiredError,
+    IGFBEmailTaken,
     IGFBNoContactPointFoundError,
+    IGFBSSODisabled,
     IGLoginBadPasswordError,
     IGLoginInvalidUserError,
     IGLoginRequiredError,
     IGLoginTwoFactorRequiredError,
     IGLoginUnusablePasswordError,
     IGNotLoggedInError,
+    IGRateLimitError,
     IGResponseError,
 )
 from mauigpapi.types import ChallengeStateResponse, LoginResponse
@@ -64,11 +68,13 @@ class ProvisioningAPI:
         self.app.router.add_get("/api/whoami", self.status)
         self.app.router.add_options("/api/login", self.login_options)
         self.app.router.add_options("/api/login/2fa", self.login_options)
+        self.app.router.add_options("/api/login/resend_2fa_sms", self.login_options)
         self.app.router.add_options("/api/login/checkpoint", self.login_options)
         self.app.router.add_options("/api/login/fb", self.login_options)
         self.app.router.add_options("/api/logout", self.login_options)
         self.app.router.add_post("/api/login", self.login)
         self.app.router.add_post("/api/login/2fa", self.login_2fa)
+        self.app.router.add_post("/api/login/resend_2fa_sms", self.login_resend_2fa_sms)
         self.app.router.add_post("/api/login/checkpoint", self.login_checkpoint)
         self.app.router.add_get("/api/login/fb", self.get_fb_login_url)
         self.app.router.add_post("/api/login/fb", self.post_fb_login_token)
@@ -211,7 +217,7 @@ class ProvisioningAPI:
         )
 
     def _unknown_error(
-        self, user: u.User, username: str, e: Exception, after: str
+        self, user: u.User, username: str, e: Exception, after: str, track_error: bool = True
     ) -> web.Response:
         self.log.exception(
             "Unknown error while %s was trying to log in as %s (after %s)",
@@ -219,14 +225,22 @@ class ProvisioningAPI:
             username,
             after,
         )
+        error_code = "unknown-error"
         if isinstance(e, IGResponseError):
             self.log.debug(
                 "Login error body: %s",
                 e.body.serialize() if isinstance(e.body, Serializable) else e.body,
             )
-        track(user, "$login_failed", {"error": "unknown-error"})
+            if "error_type" in e.body:
+                error_code = e.body["error_type"]
+        if track_error:
+            track(user, "$login_failed", {"error": error_code})
         return web.json_response(
-            data={"error": "Unknown error while logging in", "status": "unknown-error"},
+            data={
+                "error": "Unknown error while logging in",
+                "status": "unknown-error",
+                "ig_error_code": error_code,
+            },
             status=500,
             headers=self._acao_headers,
         )
@@ -253,21 +267,12 @@ class ProvisioningAPI:
             )
 
         self.log.debug("%s is attempting to log in as %s", user.mxid, username)
-        track(user, "$login_start")
+        track(user, "$login_start", {"type": "instagram"})
         api, state = await get_login_state(user, self.device_seed)
         try:
             resp = await api.login(username, password)
         except IGLoginTwoFactorRequiredError as e:
-            track(user, "$login_2fa")
-            self.log.debug("%s logged in as %s, but needs 2-factor auth", user.mxid, username)
-            return web.json_response(
-                data={
-                    "status": "two-factor",
-                    "response": e.body.serialize(),
-                },
-                status=202,
-                headers=self._acao_headers,
-            )
+            return self._2fa_required(user, username, state, e)
         except IGChallengeError as e:
             self.log.debug("%s logged in as %s, but got a challenge", user.mxid, username)
             return await self.start_checkpoint(user, state, api, e, after="password")
@@ -311,6 +316,30 @@ class ProvisioningAPI:
             return self._unknown_error(user, username, e, after="password")
         return await self._finish_login(user, state, api, login_resp=resp, after="password")
 
+    def _2fa_required(
+        self, user: u.User, username: str, state: AndroidState, err: IGLoginTwoFactorRequiredError
+    ) -> web.Response:
+        track(user, "$login_2fa")
+        found_username = err.body.two_factor_info.username if err.body.two_factor_info else None
+        if found_username and found_username != username:
+            state.login_2fa_username = found_username
+        else:
+            state.login_2fa_username = None
+        self.log.debug(
+            "%s logged in as %s -> %s, but needs 2-factor auth",
+            user.mxid,
+            username,
+            found_username or "<no username?>",
+        )
+        return web.json_response(
+            data={
+                "status": "two-factor",
+                "response": err.body.serialize(),
+            },
+            status=202,
+            headers=self._acao_headers,
+        )
+
     async def _get_user(
         self, request: web.Request, check_state: bool = False, read_body: bool = True
     ) -> tuple[u.User, JSON]:
@@ -328,6 +357,57 @@ class ProvisioningAPI:
         else:
             data = None
         return user, data
+
+    async def login_resend_2fa_sms(self, request: web.Request) -> web.Response:
+        user, data = await self._get_user(request, check_state=True)
+
+        try:
+            username = data["username"]
+            identifier = data["2fa_identifier"]
+        except KeyError as e:
+            raise self._missing_key_error(e)
+
+        api: AndroidAPI = user.command_status["api"]
+        state: AndroidState = user.command_status["state"]
+        if state.login_2fa_username and "@" in username or "+" in username:
+            self.log.debug(
+                "Replacing %s with %s in 2FA SMS re-request", username, state.login_2fa_username
+            )
+            username = state.login_2fa_username
+        track(user, "$login_resend_2fa_sms")
+        try:
+            resp = await api.send_two_factor_login_sms(username, identifier=identifier)
+        except IGRateLimitError as e:
+            track(user, "$login_resend_2fa_sms_fail", {"error": "ratelimit"})
+            try:
+                message = e.body["message"]
+            except (KeyError, TypeError, AttributeError):
+                message = "Please wait a few minutes before you try again."
+            self.log.debug("%s got a ratelimit error trying to request new SMS code", user.mxid)
+            self.log.debug(
+                "Login error body: %s",
+                e.body.serialize() if isinstance(e.body, Serializable) else e.body,
+            )
+            return web.json_response(
+                data={
+                    "status": "2fa-resend-ratelimit",
+                    "error": message,
+                },
+                status=429,
+            )
+        except Exception as e:
+            track(user, "$login_resend_2fa_sms_fail", {"error": "unknown"})
+            return self._unknown_error(
+                user, username, e, after="2fa sms request", track_error=False
+            )
+        return web.json_response(
+            data={
+                "status": "two-factor",
+                "response": resp.serialize(),
+            },
+            status=202,
+            headers=self._acao_headers,
+        )
 
     async def login_2fa(self, request: web.Request) -> web.Response:
         user, data = await self._get_user(request, check_state=True)
@@ -348,6 +428,11 @@ class ProvisioningAPI:
 
         api: AndroidAPI = user.command_status["api"]
         state: AndroidState = user.command_status["state"]
+        if state.login_2fa_username and "@" in username or "+" in username:
+            self.log.debug(
+                "Replacing %s with %s in 2FA login request", username, state.login_2fa_username
+            )
+            username = state.login_2fa_username
         track(user, "$login_submit_2fa")
         try:
             resp = await api.two_factor_login(
@@ -360,6 +445,18 @@ class ProvisioningAPI:
                 data={
                     "error": "Incorrect 2-factor authentication code",
                     "status": "incorrect-2fa-code",
+                },
+                status=403,
+                headers=self._acao_headers,
+            )
+        except IG2FACodeExpiredError as e:
+            self.log.debug("%s submitted an expired 2-factor auth code", user.mxid)
+            self.log.debug("Login error body: %s", e.body)
+            track(user, "$login_failed", {"error": "expired-2fa-code"})
+            return web.json_response(
+                data={
+                    "error": e.body.get("message") or str(e),
+                    "status": "expired-2fa-code",
                 },
                 status=403,
                 headers=self._acao_headers,
@@ -379,10 +476,8 @@ class ProvisioningAPI:
         self, user: u.User, state: AndroidState, api: AndroidAPI, err: IGChallengeError, after: str
     ) -> web.Response:
         try:
-            resp = await api.challenge_auto(reset=True)
+            resp = await api.challenge_auto(reset=after == "2fa")
         except Exception:
-            # Most likely means that the user has to go and verify the login on their phone.
-            # Return a 403 in this case so the client knows to show such verbiage.
             self.log.exception("Challenge reset failed for %s", user.mxid)
             track(user, "$login_failed", {"error": "challenge-reset-fail", "after": after})
             return web.json_response(
@@ -404,6 +499,18 @@ class ProvisioningAPI:
             f"{liu.pk}/{liu.username}" if liu else "null",
         )
         if resp.action == "close" and resp.status == "ok":
+            if not liu and after == "password":
+                self.log.debug("Assuming login failed due to lack of 2FA")
+                track(user, "$login_failed", {"error": "2fa-not-enabled", "after": after})
+                return web.json_response(
+                    data={
+                        "status": "2fa-not-enabled",
+                        "response": err.body.serialize(),
+                        "error": "You must enable two-factor authentication before logging in",
+                    },
+                    status=403,
+                    headers=self._acao_headers,
+                )
             return await self._finish_login(
                 user, state, api, resp, after=f"{after}/challenge-auto"
             )
@@ -552,6 +659,7 @@ class ProvisioningAPI:
             "return_scopes": "true",
         }
         self.log.debug("%s requested a Facebook login URL (logger ID %s)", user.mxid, logger_id)
+        track(user, "$login_get_fb_url")
         return web.json_response(
             {
                 "url": str(URL("https://m.facebook.com/v2.3/dialog/oauth").with_query(query)),
@@ -577,15 +685,19 @@ class ProvisioningAPI:
         self.log.debug(
             "%s is attempting to log in with Facebook token (logger ID %s)", user.mxid, logger_id
         )
+        track(user, "$login_start", {"type": "facebook"})
         api, state = await get_login_state(user, self.device_seed)
         try:
             resp = await api.facebook_signup(fb_access_token)
         except IGFBNoContactPointFoundError as e:
             self.log.debug(
                 "%s sent a valid Facebook token, "
-                "but it didn't seem to have an Instagram account linked (%s)",
+                "but it didn't seem to have an Instagram account linked",
                 user.mxid,
-                e.body.serialize(),
+            )
+            self.log.debug("Login error body: %s", e.body.serialize())
+            track(
+                user, "$login_failed", {"error": "fb-no-account-found", "after": "facebook auth"}
             )
             return web.json_response(
                 data={
@@ -595,8 +707,59 @@ class ProvisioningAPI:
                 status=403,
                 headers=self._acao_headers,
             )
+        except IGFBEmailTaken as e:
+            maybe_username = None
+            for button in e.body.buttons or []:
+                if button.title == "username_log_in":
+                    maybe_username = button.username
+                    break
+            self.log.debug(
+                "%s sent a valid Facebook token, but it didn't seem to have an Instagram account "
+                "linked, and the email is already taken by %s",
+                user.mxid,
+                maybe_username,
+            )
+            self.log.debug("Login error body: %s", e.body.serialize())
+            track(
+                user,
+                "$login_failed",
+                {"error": "fb-no-account-found-email-taken", "after": "facebook auth"},
+            )
+            return web.json_response(
+                data={
+                    "error": "You don't have an Instagram account linked to that Facebook account",
+                    "username": maybe_username,
+                    "status": e.body.error_type,
+                },
+                status=403,
+                headers=self._acao_headers,
+            )
+        except IGFBSSODisabled as e:
+            self.log.debug(
+                "%s sent a valid Facebook token for %s, but it doesn't have SSO enabled",
+                user.mxid,
+                e.body.username,
+            )
+            self.log.debug("Login error body: %s", e.body.serialize())
+            track(user, "$login_failed", {"error": "fb-sso-disabled", "after": "facebook auth"})
+            return web.json_response(
+                data={
+                    "error": (
+                        "You haven't enabled sign-in using Facebook "
+                        f"in your Instagram account ({e.body.username})"
+                    ),
+                    "username": e.body.username,
+                    "status": e.body.error_type,
+                },
+                status=403,
+                headers=self._acao_headers,
+            )
+        except IGLoginTwoFactorRequiredError as e:
+            return self._2fa_required(user, "<facebook credentials>", state, e)
         except IGCheckpointError as e:
             return self._checkpoint_error(user, "<facebook credentials>", e, after="facebook auth")
         except IGConsentRequiredError as e:
             return self._consent_error(user, "<facebook credentials>", e, after="facebook auth")
+        except Exception as e:
+            return self._unknown_error(user, "<facebook credentials>", e, after="facebook auth")
         return await self._finish_login(user, state, api, login_resp=resp, after="facebook auth")

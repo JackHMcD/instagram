@@ -1,5 +1,5 @@
 # mautrix-instagram - A Matrix-Instagram puppeting bridge.
-# Copyright (C) 2022 Tulir Asokan
+# Copyright (C) 2023 Tulir Asokan
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -21,19 +21,22 @@ import logging
 import random
 import time
 
-from aiohttp import ClientResponse, ClientSession, ContentTypeError
+from aiohttp import ClientResponse, ClientSession, ContentTypeError, CookieJar
 from yarl import URL
 
 from mautrix.types import JSON, Serializable
 from mautrix.util.logging import TraceLogger
 
 from ..errors import (
+    IG2FACodeExpiredError,
     IGActionSpamError,
     IGBad2FACodeError,
     IGChallengeError,
     IGCheckpointError,
     IGConsentRequiredError,
+    IGFBEmailTaken,
     IGFBNoContactPointFoundError,
+    IGFBSSODisabled,
     IGInactiveUserError,
     IGLoginBadPasswordError,
     IGLoginInvalidUserError,
@@ -48,7 +51,14 @@ from ..errors import (
     IGUnknownError,
     IGUserHasLoggedOutError,
 )
+from ..proxy import ProxyHandler
 from ..state import AndroidState
+from ..types import ChallengeContext
+
+try:
+    from aiohttp_socks import ProxyConnector
+except ImportError:
+    ProxyConnector = None
 
 T = TypeVar("T")
 
@@ -65,10 +75,18 @@ class BaseAndroidAPI:
     state: AndroidState
     log: TraceLogger
 
-    def __init__(self, state: AndroidState, log: TraceLogger | None = None) -> None:
-        self.http = ClientSession(cookie_jar=state.cookies.jar)
-        self.state = state
+    def __init__(
+        self,
+        state: AndroidState,
+        log: TraceLogger | None = None,
+        proxy_handler: ProxyHandler | None = None,
+    ) -> None:
         self.log = log or logging.getLogger("mauigpapi.http")
+
+        self.proxy_handler = proxy_handler
+        self.setup_http(cookie_jar=state.cookies.jar)
+
+        self.state = state
 
     @staticmethod
     def sign(req: Any, filter_nulls: bool = False) -> dict[str, str]:
@@ -85,27 +103,22 @@ class BaseAndroidAPI:
             "x-device-id": self.state.device.uuid,
             "x-ig-app-locale": self.state.device.language,
             "x-ig-device-locale": self.state.device.language,
-            "x-pigeon-session-id": self.state.pigeon_session_id,
+            "x-ig-mapped-locale": self.state.device.language,
+            "x-pigeon-session-id": f"UFS-{self.state.pigeon_session_id}-0",
             "x-pigeon-rawclienttime": str(round(time.time(), 3)),
-            "x-ig-connection-speed": f"{random.randint(1000, 3700)}kbps",
             "x-ig-bandwidth-speed-kbps": "-1.000",
             "x-ig-bandwidth-totalbytes-b": "0",
             "x-ig-bandwidth-totaltime-ms": "0",
-            "x-ig-eu-dc-enabled": (
-                str(self.state.session.eu_dc_enabled).lower()
-                if self.state.session.eu_dc_enabled is not None
-                else None
-            ),
             "x-ig-app-startup-country": self.state.device.language.split("_")[1],
             "x-bloks-version-id": self.state.application.BLOKS_VERSION_ID,
             "x-ig-www-claim": self.state.session.ig_www_claim or "0",
             "x-bloks-is-layout-rtl": str(self.state.device.is_layout_rtl).lower(),
-            "x-bloks-is-panorama-enabled": "true",
             "x-ig-timezone-offset": self.state.device.timezone_offset,
-            # "x-messenger": "1",
             "x-ig-device-id": self.state.device.uuid,
+            "x-ig-family-device-id": self.state.device.fdid,
             "x-ig-android-id": self.state.device.id,
             "x-ig-connection-type": self.state.device.connection_type,
+            "x-fb-connection-type": self.state.device.connection_type,
             "x-ig-capabilities": self.state.application.CAPABILITIES,
             "x-ig-app-id": self.state.application.FACEBOOK_ANALYTICS_APPLICATION_ID,
             "user-agent": self.state.user_agent,
@@ -117,11 +130,28 @@ class BaseAndroidAPI:
             "ig-u-shbts": self.state.session.shbts,
             "ig-u-ds-user-id": self.state.session.ds_user_id,
             "ig-u-rur": self.state.session.rur,
+            "ig-intended-user-id": self.state.session.ds_user_id or "0",
+            "ig-client-endpoint": "unknown",
             "x-fb-http-engine": "Liger",
             "x-fb-client-ip": "True",
+            "x-fb-rmd": "cached=0;state=NO_MATCH",
+            "x-fb-server-cluster": "True",
+            "x-tigon-is-retry": "False",
             "accept-encoding": "gzip",
         }
         return {k: v for k, v in headers.items() if v is not None}
+
+    def setup_http(self, cookie_jar: CookieJar) -> None:
+        connector = None
+        http_proxy = self.proxy_handler.get_proxy_url() if self.proxy_handler else None
+        if http_proxy:
+            if ProxyConnector:
+                connector = ProxyConnector.from_url(http_proxy)
+            else:
+                self.log.warning("http_proxy is set, but aiohttp-socks is not installed")
+
+        self.http = ClientSession(connector=connector, cookie_jar=cookie_jar)
+        return None
 
     def raw_http_get(self, url: URL | str):
         if isinstance(url, str):
@@ -209,7 +239,17 @@ class BaseAndroidAPI:
         if isinstance(message, str):
             if message == "challenge_required":
                 err = IGChallengeError(resp, data)
+                self.log.debug(f"Storing challenge URL {err.url}")
                 self.state.challenge_path = err.url
+                try:
+                    self.state.challenge_context = ChallengeContext.parse_json(
+                        err.body.challenge.challenge_context
+                    )
+                except Exception:
+                    self.log.exception(
+                        "Failed to deserialize challenge_context %s",
+                        err.body.challenge.challenge_context,
+                    )
                 raise err
             elif message == "checkpoint_required":
                 raise IGCheckpointError(resp, data)
@@ -235,8 +275,16 @@ class BaseAndroidAPI:
             raise IGLoginInvalidUserError(resp, data)
         elif error_type == "sms_code_validation_code_invalid":
             raise IGBad2FACodeError(resp, data)
+        elif error_type == "invalid_nonce":
+            raise IG2FACodeExpiredError(resp, data)
         elif error_type == "fb_no_contact_point_found":
             raise IGFBNoContactPointFoundError(resp, data)
+        elif error_type == "fb_email_taken":
+            raise IGFBEmailTaken(resp, data)
+        elif error_type == "sso_disabled":
+            raise IGFBSSODisabled(resp, data)
+        elif error_type == "rate_limit_error":
+            raise IGRateLimitError(resp, data)
 
         raise IGResponseError(resp, data)
 

@@ -9,7 +9,7 @@ from .account import (
     ProfileEditParams,
     UserIdentifier,
 )
-from .challenge import ChallengeStateData, ChallengeStateResponse
+from .challenge import ChallengeContext, ChallengeStateData, ChallengeStateResponse
 from .direct_inbox import DMInbox, DMInboxCursor, DMInboxResponse, DMThreadResponse
 from .error import (
     ChallengeData,
@@ -57,12 +57,20 @@ from .mqtt import (
     RealtimeDirectEvent,
     RealtimeZeroProvisionPayload,
     ThreadAction,
+    ThreadRemoveEvent,
     ThreadSyncEvent,
     TypingStatus,
     ZeroProductProvisioningEvent,
 )
 from .qe import AndroidExperiment, QeSyncExperiment, QeSyncExperimentParam, QeSyncResponse
-from .thread import Thread, ThreadItem, ThreadTheme, ThreadUser, ThreadUserLastSeenAt
+from .thread import (
+    Thread,
+    ThreadImageCandidate,
+    ThreadItem,
+    ThreadTheme,
+    ThreadUser,
+    ThreadUserLastSeenAt,
+)
 from .thread_item import (
     AnimatedMediaImage,
     AnimatedMediaImages,
