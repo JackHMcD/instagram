@@ -59,12 +59,18 @@ class ProvisioningAPI:
     log: TraceLogger = logging.getLogger("mau.web.provisioning")
     app: web.Application
 
-    def __init__(self, shared_secret: str, device_seed: str, segment_key: str | None) -> None:
+    def __init__(
+        self,
+        shared_secret: str,
+        device_seed: str,
+        segment_key: str | None,
+        segment_user_id: str | None,
+    ) -> None:
         self.app = web.Application()
         self.shared_secret = shared_secret
         self.device_seed = device_seed
         if segment_key:
-            init_segment(segment_key)
+            init_segment(segment_key, segment_user_id)
         self.app.router.add_get("/api/whoami", self.status)
         self.app.router.add_options("/api/login", self.login_options)
         self.app.router.add_options("/api/login/2fa", self.login_options)
@@ -753,6 +759,24 @@ class ProvisioningAPI:
                 },
                 status=403,
                 headers=self._acao_headers,
+            )
+        except IGRateLimitError as e:
+            track(user, "$login_failed", {"error": "fb-ratelimit"})
+            try:
+                message = e.body["message"]
+            except (KeyError, TypeError, AttributeError):
+                message = "Please wait a few minutes before you try again."
+            self.log.debug("%s got a ratelimit error trying to post FB login token", user.mxid)
+            self.log.debug(
+                "Login error body: %s",
+                e.body.serialize() if isinstance(e.body, Serializable) else e.body,
+            )
+            return web.json_response(
+                data={
+                    "status": "fb-ratelimit",
+                    "error": message,
+                },
+                status=429,
             )
         except IGLoginTwoFactorRequiredError as e:
             return self._2fa_required(user, "<facebook credentials>", state, e)
